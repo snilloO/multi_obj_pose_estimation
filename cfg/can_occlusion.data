@@ -1,0 +1,4 @@
+valid  = ../dataset/LINEMOD/can/test_occlusion.txt
+mesh = ../dataset/LINEMOD/can/can.ply
+name = can
+diam = 0.202

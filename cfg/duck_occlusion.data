@@ -1,0 +1,4 @@
+valid  = ../dataset/LINEMOD/duck/test_occlusion.txt
+mesh = ../dataset/LINEMOD/duck/duck.ply
+name = duck
+diam = 0.109

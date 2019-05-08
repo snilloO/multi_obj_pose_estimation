@@ -1,0 +1,8 @@
+train  = ../dataset/LINEMOD/benchvise/train.txt
+valid  = ../dataset/LINEMOD/benchvise/test.txt
+backup = ../dataset/backup
+mesh = ../dataset/LINEMOD/benchvise/benchvise.ply
+tr_range = ../dataset/LINEMOD/benchvise/training_range.txt
+name = benchvise
+diam = 0.286908
+checkpoint = ../checkpoint_multi

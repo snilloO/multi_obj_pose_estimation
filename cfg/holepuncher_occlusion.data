@@ -1,0 +1,5 @@
+valid  = ../dataset/LINEMOD/holepuncher/test_occlusion.txt
+mesh = ../dataset/LINEMOD/holepuncher/holepuncher.ply
+backup = backup_multi
+name = holepuncher
+diam = 0.162

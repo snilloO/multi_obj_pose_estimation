@@ -1,0 +1,4 @@
+valid  = ../dataset/LINEMOD/eggbox/test_occlusion.txt
+mesh = ../dataset/LINEMOD/eggbox/eggbox.ply
+name = eggbox
+diam = 0.176364

@@ -1,0 +1,4 @@
+valid  = ../dataset/LINEMOD/ape/test_occlusion.txt
+mesh = ../dataset/LINEMOD/ape/ape.ply
+name = ape
+diam = 0.103

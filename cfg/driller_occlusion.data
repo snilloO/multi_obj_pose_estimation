@@ -1,0 +1,4 @@
+valid  = ../dataset/LINEMOD/driller/test_occlusion.txt
+mesh = ../dataset/LINEMOD/driller/driller.ply
+name = driller
+diam = 0.262
