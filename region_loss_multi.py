@@ -6,11 +6,10 @@ import torch.nn.functional as F
 from torch.autograd import Variable
 from utils import *
 
-def build_targets(pred_corners, target, anchors, num_anchors, num_classes, nH, nW, noobject_scale, object_scale, sil_thresh, seen):
+def build_targets(pred_corners, target, num_anchors, num_classes, nH, nW, noobject_scale, object_scale, sil_thresh, seen):
     nB = target.size(0)
     nA = num_anchors
     nC = num_classes
-    anchor_step = len(anchors)//num_anchors
     conf_mask   = torch.ones(nB, nA, nH, nW) * noobject_scale
     coord_mask  = torch.zeros(nB, nA, nH, nW)
     cls_mask    = torch.zeros(nB, nA, nH, nW)
@@ -65,26 +64,6 @@ def build_targets(pred_corners, target, anchors, num_anchors, num_classes, nH, n
             cur_gt_corners = torch.FloatTensor([gx0/nW,gy0/nH,gx1/nW,gy1/nH,gx2/nW,gy2/nH,gx3/nW,gy3/nH,gx4/nW,gy4/nH,gx5/nW,gy5/nH,gx6/nW,gy6/nH,gx7/nW,gy7/nH,gx8/nW,gy8/nH]).repeat(nAnchors,1).t() # 16 x nAnchors
             cur_confs  = torch.max(cur_confs, corner_confidences9(cur_pred_corners, cur_gt_corners)) # some irrelevant areas are filtered, in the same grid multiple anchor boxes might exceed the threshold
         conf_mask[b][cur_confs.view_as(conf_mask[b])>sil_thresh] = 0
-    if seen < -1:#6400:
-       tx0.fill_(0.5)
-       ty0.fill_(0.5)
-       tx1.fill_(0.5)
-       ty1.fill_(0.5)
-       tx2.fill_(0.5)
-       ty2.fill_(0.5)
-       tx3.fill_(0.5)
-       ty3.fill_(0.5)
-       tx4.fill_(0.5)
-       ty4.fill_(0.5)
-       tx5.fill_(0.5)
-       ty5.fill_(0.5)
-       tx6.fill_(0.5)
-       ty6.fill_(0.5)
-       tx7.fill_(0.5)
-       ty7.fill_(0.5)
-       tx8.fill_(0.5)
-       ty8.fill_(0.5)
-       coord_mask.fill_(1)
 
     nGT = 0
     nCorrect = 0
@@ -95,7 +74,6 @@ def build_targets(pred_corners, target, anchors, num_anchors, num_classes, nH, n
             nGT = nGT + 1
             best_iou = 0.0
             best_n = -1
-            min_dist = 10000
             gx0 = target[b][t*21+1] * nW
             gy0 = target[b][t*21+2] * nH
             gi0 = int(gx0)
@@ -116,58 +94,49 @@ def build_targets(pred_corners, target, anchors, num_anchors, num_classes, nH, n
             gy7 = target[b][t*21+16] * nH
             gx8 = target[b][t*21+17] * nW
             gy8 = target[b][t*21+18] * nH
-
-            gw  = target[b][t*21+19]*nW
-            gh  = target[b][t*21+20]*nH
-            gt_box = [0, 0, gw, gh]
-            for n in range(nA):
-                aw = anchors[anchor_step*n]
-                ah = anchors[anchor_step*n+1]
-                anchor_box = [0, 0, aw, ah]
-                iou  = bbox_iou(anchor_box, gt_box, x1y1x2y2=False)
-                if iou > best_iou:
-                    best_iou = iou
-                    best_n = n
-
-            gt_box = [gx0/nW,gy0/nH,gx1/nW,gy1/nH,gx2/nW,gy2/nH,gx3/nW,gy3/nH,gx4/nW,gy4/nH,gx5/nW,gy5/nH,gx6/nW,gy6/nH,gx7/nW,gy7/nH,gx8/nW,gy8/nH]
-            pred_box = pred_corners[b*nAnchors+best_n*nPixels+gj0*nW+gi0]
-            conf = corner_confidence9(gt_box, pred_box) 
-            coord_mask[b][best_n][gj0][gi0] = 1
-            cls_mask[b][best_n][gj0][gi0]   = 1
-            conf_mask[b][best_n][gj0][gi0]  = object_scale
-            tx0[b][best_n][gj0][gi0]        = target[b][t*21+1] * nW - gi0
-            ty0[b][best_n][gj0][gi0]        = target[b][t*21+2] * nH - gj0
-            tx1[b][best_n][gj0][gi0]        = target[b][t*21+3] * nW - gi0
-            ty1[b][best_n][gj0][gi0]        = target[b][t*21+4] * nH - gj0
-            tx2[b][best_n][gj0][gi0]        = target[b][t*21+5] * nW - gi0
-            ty2[b][best_n][gj0][gi0]        = target[b][t*21+6] * nH - gj0
-            tx3[b][best_n][gj0][gi0]        = target[b][t*21+7] * nW - gi0
-            ty3[b][best_n][gj0][gi0]        = target[b][t*21+8] * nH - gj0
-            tx4[b][best_n][gj0][gi0]        = target[b][t*21+9] * nW - gi0
-            ty4[b][best_n][gj0][gi0]        = target[b][t*21+10] * nH - gj0
-            tx5[b][best_n][gj0][gi0]        = target[b][t*21+11] * nW - gi0
-            ty5[b][best_n][gj0][gi0]        = target[b][t*21+12] * nH - gj0
-            tx6[b][best_n][gj0][gi0]        = target[b][t*21+13] * nW - gi0
-            ty6[b][best_n][gj0][gi0]        = target[b][t*21+14] * nH - gj0
-            tx7[b][best_n][gj0][gi0]        = target[b][t*21+15] * nW - gi0
-            ty7[b][best_n][gj0][gi0]        = target[b][t*21+16] * nH - gj0
-            tx8[b][best_n][gj0][gi0]        = target[b][t*21+17] * nW - gi0
-            ty8[b][best_n][gj0][gi0]        = target[b][t*21+18] * nH - gj0
-            tconf[b][best_n][gj0][gi0]      = conf
-            tcls[b][best_n][gj0][gi0]       = target[b][t*21]
-
-            if conf > 0.5:
-                nCorrect = nCorrect + 1
+            best_n = int(target[b][t*21+1])
+            gps = [(gx0,gy0),(gx1,gy1),(gx2,gy2),(gx3,gy3),(gx4,gy4),(gx5,gy5),(gx6,gy6),(gx7,gy7),(gx8,gy8)]
+            cur_conf = -1
+            for gp in gps:
+                gi0,gj0 = int(gp[0]),int(gp[1])
+                gt_box = [gx0/nW,gy0/nH,gx1/nW,gy1/nH,gx2/nW,gy2/nH,gx3/nW,gy3/nH,gx4/nW,gy4/nH,gx5/nW,gy5/nH,gx6/nW,gy6/nH,gx7/nW,gy7/nH,gx8/nW,gy8/nH]
+                pred_box = pred_corners[b*nAnchors+best_n*nPixels+gj0*nW+gi0]
+                conf = corner_confidence9(gt_box, pred_box)
+                if conf>cur_conf:
+                    cur_conf = conf 
+                    coord_mask[b][best_n][gj0][gi0] = 1
+                    cls_mask[b][best_n][gj0][gi0]   = 1
+                    conf_mask[b][best_n][gj0][gi0]  = object_scale
+                    tx0[b][best_n][gj0][gi0]        = target[b][t*21+1] * nW - gi0
+                    ty0[b][best_n][gj0][gi0]        = target[b][t*21+2] * nH - gj0
+                    tx1[b][best_n][gj0][gi0]        = target[b][t*21+3] * nW - gi0
+                    ty1[b][best_n][gj0][gi0]        = target[b][t*21+4] * nH - gj0
+                    tx2[b][best_n][gj0][gi0]        = target[b][t*21+5] * nW - gi0
+                    ty2[b][best_n][gj0][gi0]        = target[b][t*21+6] * nH - gj0
+                    tx3[b][best_n][gj0][gi0]        = target[b][t*21+7] * nW - gi0
+                    ty3[b][best_n][gj0][gi0]        = target[b][t*21+8] * nH - gj0
+                    tx4[b][best_n][gj0][gi0]        = target[b][t*21+9] * nW - gi0
+                    ty4[b][best_n][gj0][gi0]        = target[b][t*21+10] * nH - gj0
+                    tx5[b][best_n][gj0][gi0]        = target[b][t*21+11] * nW - gi0
+                    ty5[b][best_n][gj0][gi0]        = target[b][t*21+12] * nH - gj0
+                    tx6[b][best_n][gj0][gi0]        = target[b][t*21+13] * nW - gi0
+                    ty6[b][best_n][gj0][gi0]        = target[b][t*21+14] * nH - gj0
+                    tx7[b][best_n][gj0][gi0]        = target[b][t*21+15] * nW - gi0
+                    ty7[b][best_n][gj0][gi0]        = target[b][t*21+16] * nH - gj0
+                    tx8[b][best_n][gj0][gi0]        = target[b][t*21+17] * nW - gi0
+                    ty8[b][best_n][gj0][gi0]        = target[b][t*21+18] * nH - gj0
+                    tconf[b][best_n][gj0][gi0]      = conf
+                    tcls[b][best_n][gj0][gi0]       = 1.0
+                    if conf > 0.5:
+                        nCorrect = nCorrect + 1
 
     return nGT, nCorrect, coord_mask, conf_mask, cls_mask, tx0, tx1, tx2, tx3, tx4, tx5, tx6, tx7, tx8, ty0, ty1, ty2, ty3, ty4, ty5, ty6, ty7, ty8, tconf, tcls
            
 class RegionLoss(nn.Module):
-    def __init__(self, num_classes=0, anchors=[], num_anchors=5):
+    def __init__(self, num_classes=0, num_anchors=8):
         super(RegionLoss, self).__init__()
         self.num_classes = num_classes
-        self.anchors = anchors
         self.num_anchors = num_anchors
-        self.anchor_step = len(anchors)/num_anchors
         self.coord_scale = 1
         self.noobject_scale = 1
         self.object_scale = 5
@@ -238,7 +207,7 @@ class RegionLoss(nn.Module):
 
         # Build targets
         nGT, nCorrect, coord_mask, conf_mask, cls_mask, tx0, tx1, tx2, tx3, tx4, tx5, tx6, tx7, tx8, ty0, ty1, ty2, ty3, ty4, ty5, ty6, ty7, ty8, tconf, tcls = \
-                       build_targets(pred_corners, target.data, self.anchors, nA, nC, nH, nW, self.noobject_scale, self.object_scale, self.thresh, self.seen)
+                       build_targets(pred_corners, target.data,nA, nC, nH, nW, self.noobject_scale, self.object_scale, self.thresh, self.seen)
         cls_mask   = (cls_mask == 1)
         nProposals = int((conf > 0.25).sum().data[0])
         tx0        = Variable(tx0.cuda())
@@ -260,11 +229,11 @@ class RegionLoss(nn.Module):
         tx8        = Variable(tx8.cuda())
         ty8        = Variable(ty8.cuda())
         tconf      = Variable(tconf.cuda())
-        tcls       = Variable(tcls[cls_mask].long().cuda())
+        tcls       = Variable(tcls)
         coord_mask = Variable(coord_mask.cuda())
         conf_mask  = Variable(conf_mask.cuda().sqrt())
-        cls_mask   = Variable(cls_mask.view(-1, 1).repeat(1,nC).cuda())
-        cls        = cls[cls_mask].view(-1, nC)  
+        #cls_mask   = Variable(cls_mask.view(-1, 1).repeat(1,nC).cuda())
+        cls        = cls*cls_mask 
         t3 = time.time()
 
         # Create loss
@@ -291,9 +260,11 @@ class RegionLoss(nn.Module):
         loss_y     = loss_y0 + loss_y1 + loss_y2 + loss_y3 + loss_y4 + loss_y5 + loss_y6 + loss_y7 + loss_y8 
         xs = [loss_x0,loss_x1,loss_x2,loss_x3,loss_x4,loss_x5,loss_x6,loss_x7,loss_x8]
         ys = [loss_y0,loss_y1,loss_y2,loss_y3,loss_y4, loss_y5, loss_y6,loss_y7,loss_y8]
-        loss_cls   =  nn.CrossEntropyLoss(size_average=False)(cls, tcls)
-        losses = xs+ys+[loss_conf,self.class_scale *loss_cls]
+        loss_cls = nn.BCELoss(reduce=False)(cls,tcls)
+        clses = list(self.class_scale *loss_cls.sum(0).sum(1).sum(1))
+        losses = xs+ys+[loss_conf]+clses
         losses = sorted(losses,reverse=False)
+        loss_cls = loss_cls.sum()
         #print(cls,tcls)
         #print(cls.shape,len(tcls))        
         loss   = loss_x + loss_y + loss_conf + self.class_scale *loss_cls
