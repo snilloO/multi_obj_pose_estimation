@@ -184,10 +184,20 @@ def eval(epoch, datacfg, cfgfile):
         t3 = time.time()
         
         # Using confidence threshold, eliminate low-confidence predictions
-        trgt = target[0].view(-1, 21)
-        all_boxes = get_corresponding_region_boxes(output, conf_thresh, num_classes, anchors, num_anchors, int(trgt[0][0]), only_objectness=0)    
-        t4 = time.time()
+        #trgt = target[0].view(-1, 21)
+        #all_boxes = get_corresponding_region_boxes(output, conf_thresh, num_classes, anchors, num_anchors, int(trgt[0][0]), only_objectness=0)
+        all_boxes =[]
+        for b in range(output.size(0)):
+            boxes = []
+            for i in range(num_anchors):
+                _,_,H,W = output.shape
+                cur_output = output[b,i*20:(i+1)*20,:,:].squeeze().reshape(20,-1)
+                scores = cur_output[18,:,:]*cur_output[19,:,:]
+                #obj score * cls score
+                max_score,max_id = torch.max(scores.transpose(0,1),1)
+                i0,j0 = 
 
+ 
         # Iterate through all batch elements
         for i in range(output.size(0)):
 

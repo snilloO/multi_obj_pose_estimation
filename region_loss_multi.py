@@ -156,8 +156,8 @@ class RegionLoss(nn.Module):
 
         # Activation
         output = output.view(nB, nA, (19+nC), nH, nW)
-        x0     = F.sigmoid(output.index_select(2, Variable(torch.cuda.LongTensor([0]))).view(nB, nA, nH, nW))
-        y0     = F.sigmoid(output.index_select(2, Variable(torch.cuda.LongTensor([1]))).view(nB, nA, nH, nW))
+        x0     = output.index_select(2, Variable(torch.cuda.LongTensor([0]))).view(nB, nA, nH, nW)
+        y0     = output.index_select(2, Variable(torch.cuda.LongTensor([1]))).view(nB, nA, nH, nW)
         x1     = output.index_select(2, Variable(torch.cuda.LongTensor([2]))).view(nB, nA, nH, nW)
         y1     = output.index_select(2, Variable(torch.cuda.LongTensor([3]))).view(nB, nA, nH, nW)
         x2     = output.index_select(2, Variable(torch.cuda.LongTensor([4]))).view(nB, nA, nH, nW)

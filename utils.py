@@ -277,7 +277,6 @@ def convert2cpu_long(gpu_matrix):
 def get_corresponding_region_boxes(output, conf_thresh, num_classes, anchors, num_anchors, correspondingclass, only_objectness=1, validation=False):
     
     # Parameters
-    anchor_step = len(anchors)//num_anchors
     if output.dim() == 3:
         output = output.unsqueeze(0)
     batch = output.size(0)
@@ -293,8 +292,8 @@ def get_corresponding_region_boxes(output, conf_thresh, num_classes, anchors, nu
     output    = output.view(batch*num_anchors, 19+num_classes, h*w).transpose(0,1).contiguous().view(19+num_classes, batch*num_anchors*h*w)
     grid_x    = torch.linspace(0, w-1, w).repeat(h,1).repeat(batch*num_anchors, 1, 1).view(batch*num_anchors*h*w)
     grid_y    = torch.linspace(0, h-1, h).repeat(w,1).t().repeat(batch*num_anchors, 1, 1).view(batch*num_anchors*h*w)
-    xs0       = torch.sigmoid(output[0]) + grid_x
-    ys0       = torch.sigmoid(output[1]) + grid_y
+    xs0       = output[0] + grid_x
+    ys0       = output[1] + grid_y
     xs1       = output[2] + grid_x
     ys1       = output[3] + grid_y
     xs2       = output[4] + grid_x
