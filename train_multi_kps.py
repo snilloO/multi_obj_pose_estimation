@@ -188,11 +188,24 @@ def eval(epoch, datacfg, cfgfile):
         #all_boxes = get_corresponding_region_boxes(output, conf_thresh, num_classes, anchors, num_anchors, int(trgt[0][0]), only_objectness=0)
         all_boxes =[]
         for b in range(output.size(0)):
-            boxes = {}
+            boxes = []
             for i in range(num_anchors):
-                results = merge_kps_by_regions(output[b,i].squeeze())
-                boxes[i] = results       
+                _,_,nH,nW = output.shape
+                cur_output = output[b,i*20:(i+1)*20,:,:].squeeze().reshape(20,-1)
+                scores = cur_output[18]*cur_output[19]
+                kps = cur_output[:18,:]
+                kpx = kps[::2,:]
+                kpy = kps[1::2,:]
+                grid_x = torch.linspace(0, nW-1, nW).repeat(nH,1).reshape(1,-1).repeat(9,1)
+                grid_y = torch.linspace(0, nH-1, nH).t().repeat(nW,1).reshape(1,-1).repeat(9,1)
+                #obj score * cls score
+                max_score,max_id = torch.max(scores.transpose(0,1),1)
+                i0,j0 = np.unravel_index(max_id,(nH,nW))
+                #choose the keypoint with the highest score
 
+                
+
+ 
         # Iterate through all batch elements
         for i in range(output.size(0)):
 

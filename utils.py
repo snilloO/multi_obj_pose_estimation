@@ -9,10 +9,46 @@ from torch.autograd import Variable
 import torch.nn.functional as F
 import cv2
 from scipy import spatial
+import itertools
 
 import struct 
 import imghdr 
+def merge_kps_by_regions(output):
+    _,nH,nW = output.shape
+    cur_output = output.reshape(20,-1)
+    scores = cur_output[18]*cur_output[19]
+    kps = cur_output[:18,:]
+    #obj score * cls score
+    grid_x = torch.linspace(0, nW-1, nW).repeat(nH,1).reshape(1,-1).repeat(9,1)
+    kps[::2,:] += grid_x
+    grid_y = torch.linspace(0, nH-1, nH).repeat(nW,1).t().reshape(1,-1).repeat(9,1)
+    kps[1::2,:] += grid_y
+    #get the true keypoints    
+    max_score,max_id = torch.max(scores.transpose(0,1),1)
+    cur_kps = kps[:,max_id].squeeze()
+    xmin = min(0,cur_kps[::2,:].min())
+    ymin = min(0,cur_kps[1::2,:].min())
+    xmax = max(cur_kps[::2,:].max(),nW)
+    ymax = min(cur_kps[1::2,:].max(),nH)
+    gps = itertools.product(range(int(xmin),int(xmax)+1),range(int(ymin),int(ymax)+1))
+    possible_pose_shift = torch.zeros_like(cur_kps)
+    for gp in gps:
+        covering_id = gp[1]*nH + gp[0]
+        chosen_kps = kps[:,covering_id].squeeze()
+        cor_score = scores[covering_id]/max_score
+        #tbd: if necessary to divde the score by max_score
+        possible_pose_shift += cor_score*(chosen_kps-cur_kps)
+    final_kps = cur_kps+possible_pose_shift
+    final_result = torch.zeros(len(cur_kps)+2)
+    #to do0: merge opimization and confident score thresholding
+    #to do1: add ops to do sth about more objs
+    final_result[:18] = final_kps
+    final_result[19] = max_score
+    return final_result
+    
 
+
+    #choose the keypoint with the highest score
 def get_all_files(directory):
     files = []
 

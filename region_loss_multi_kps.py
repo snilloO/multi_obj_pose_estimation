@@ -5,7 +5,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
 from utils import *
-import itertools
 import numpy as np
 
 def build_targets(pred_corners, target, num_anchors, num_classes, nH, nW, noobject_scale, object_scale, sil_thresh, seen):
@@ -97,25 +96,14 @@ def build_targets(pred_corners, target, num_anchors, num_classes, nH, nW, noobje
             gx8 = target[b][t*21+17] * nW
             gy8 = target[b][t*21+18] * nH
             best_n = int(target[b][t*21+1])
-            gps = np.array([(gx0,gy0),(gx1,gy1),(gx2,gy2),(gx3,gy3),(gx4,gy4),(gx5,gy5),(gx6,gy6),(gx7,gy7),(gx8,gy8)])
-            xmin = gps[:,0].min()
-            ymin = gps[:,1].min()
-            xmax = gps[:,0].max())
-            ymax = gps[:,1].max()
-            gps = itertools.product(range(int(xmin),int(xmax)+1),range(int(ymin),int(ymax)+1))
-            #if necessary, import mask to determin the cells covering the obj
-            gt_det_box = [] 
+            gps = np.array([(gx0,gy0),(gx1,gy1),(gx2,gy2),(gx3,gy3),(gx4,gy4),(gx5,gy5),(gx6,gy6),(gx7,gy7),(gx8,gy8)]).astype('int')
             cur_conf = -1
             for gp in gps:
-                gi0,gj0 = int(gp[0]),int(gp[1])
+                gi0,gj0 = gp[0],gp[1]
                 gt_box = [gx0/nW,gy0/nH,gx1/nW,gy1/nH,gx2/nW,gy2/nH,gx3/nW,gy3/nH,gx4/nW,gy4/nH,gx5/nW,gy5/nH,gx6/nW,gy6/nH,gx7/nW,gy7/nH,gx8/nW,gy8/nH]
                 pred_box = pred_corners[b*nAnchors+best_n*nPixels+gj0*nW+gi0]
                 conf = corner_confidence9(gt_box, pred_box)
                 if conf>cur_conf:
-                    # TBD: two objs in the same class fallen into the same cells
-                    # sol1: ordinal depth -- choose the relative close one
-                    # sol2: anchors providing prior locs 
-                    # current sol: choose the kps with highest confidence  
                     cur_conf = conf 
                     coord_mask[b][best_n][gj0][gi0] = 1
                     cls_mask[b][best_n][gj0][gi0]   = 1
