@@ -100,7 +100,7 @@ def build_targets(pred_corners, target, num_anchors, num_classes, nH, nW, noobje
             gps = np.array([(gx0,gy0),(gx1,gy1),(gx2,gy2),(gx3,gy3),(gx4,gy4),(gx5,gy5),(gx6,gy6),(gx7,gy7),(gx8,gy8)])
             xmin = gps[:,0].min()
             ymin = gps[:,1].min()
-            xmax = gps[:,0].max())
+            xmax = gps[:,0].max()
             ymax = gps[:,1].max()
             gps = itertools.product(range(int(xmin),int(xmax)+1),range(int(ymin),int(ymax)+1))
             #if necessary, import mask to determin the cells covering the obj
