@@ -1,14 +1,14 @@
 
 import numpy as np
 import random
-import json
+import os
 #Train Setting
-objs = ['ape', 'benchvise', 'cam', 'can', 'cat', 'cup', 'driller', 'duck', 'eggbox','glue', 'holepuncher', 'iron', 'lamp', 'phone']
+objs = {1:'ape', 2:'benchvise', 4:'cam', 5:'can', 6:'cat', 8:'driller', 9:'duck', 10:'eggbox',11:'glue', 12:'holepuncher', 13:'iron', 14:'lamp', 15:'phone',0:'multi'}
 #640x480
 class Config:
     def __init__(self,mode='train'):
         #Path Setting
-        self.img_path = f'../dataset/'
+        self.path = f'../dataset/'
         self.checkpoint='../checkpoints'
         self.cls_num = 20        
         self.res = 50
