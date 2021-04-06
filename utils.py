@@ -1,833 +1,409 @@
-import sys
-import os
-import time
+import matplotlib.pyplot as plt 
 import math
 import torch
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
-from torch.autograd import Variable
-import torch.nn.functional as F
+from torch.utils.tensorboard import SummaryWriter
+import os 
+import json
 import cv2
-from scipy import spatial
-import itertools
+from tqdm import tqdm
 
-import struct 
-import imghdr 
-def merge_kps_by_regions(output):
-    _,nH,nW = output.shape
-    cur_output = output.reshape(20,-1)
-    scores = cur_output[18]*cur_output[19]
-    kps = cur_output[:18,:]
-    #obj score * cls score
-    grid_x = torch.linspace(0, nW-1, nW).repeat(nH,1).reshape(1,-1).repeat(9,1)
-    kps[::2,:] += grid_x
-    grid_y = torch.linspace(0, nH-1, nH).repeat(nW,1).t().reshape(1,-1).repeat(9,1)
-    kps[1::2,:] += grid_y
-    #get the true keypoints    
-    max_score,max_id = torch.max(scores.transpose(0,1),1)
-    cur_kps = kps[:,max_id].squeeze()
-    xmin = min(0,cur_kps[::2,:].min())
-    ymin = min(0,cur_kps[1::2,:].min())
-    xmax = max(cur_kps[::2,:].max(),nW)
-    ymax = min(cur_kps[1::2,:].max(),nH)
-    gps = itertools.product(range(int(xmin),int(xmax)+1),range(int(ymin),int(ymax)+1))
-    possible_pose_shift = torch.zeros_like(cur_kps)
-    for gp in gps:
-        covering_id = gp[1]*nH + gp[0]
-        chosen_kps = kps[:,covering_id].squeeze()
-        cor_score = scores[covering_id]/max_score
-        #tbd: if necessary to divde the score by max_score
-        possible_pose_shift += cor_score*(chosen_kps-cur_kps)
-    final_kps = cur_kps+possible_pose_shift
-    final_result = torch.zeros(len(cur_kps)+2)
-    #to do0: merge opimization and confident score thresholding
-    #to do1: add ops to do sth about more objs
-    final_result[:18] = final_kps
-    final_result[19] = max_score
-    return final_result
+voc_classes= {'__background__':0, 'aeroplane':1, 'bicycle':2, 
+          'bird':3, 'boat':4, 'bottle':5,'bus':6, 'car':7,
+           'cat':8, 'chair':9,'cow':10, 'diningtable':11, 'dog':12,
+            'horse':13,'motorbike':14, 'person':15, 'pottedplant':16,
+            'sheep':17, 'sofa':18, 'train':19, 'tvmonitor':20}
+voc_indices = dict([(voc_classes[k]-1,k) for k in voc_classes])
+def draw_bboxes(img,bboxes,color,th=1):
+    img_ = img.copy()
+    for bbox in bboxes:
+        x,y,w,h = bbox
+        pt1 = (int(x-w/2),int(y-h/2))
+        pt2 = (int(x+w/2),int(y+h/2))
+        img_ =cv2.rectangle(img_,pt1,pt2,color,thickness = th)
+    return img_
+def tensor_to_img(src):
+    dst = np.transpose(src.cpu().numpy(),[1,2,0])
+    return dst
+class Logger(object):
+    def __init__(self,log_dir):
+        self.log_dir = log_dir
+        self.files = {'val':open(os.path.join(log_dir,'val.txt'),'a+'),'train':open(os.path.join(log_dir,'train.txt'),'a+')}
+    def write_line2file(self,mode,string):
+        self.files[mode].write(string+'\n')
+        self.files[mode].flush()
+    def write_loss(self,epoch,losses,lr):
+        tmp = str(epoch)+'\t'+str(lr)+'\t'
+        print('Epoch',':',epoch,'-',lr)
+        writer = SummaryWriter(log_dir=self.log_dir)
+        writer.add_scalar('lr',math.log(lr),epoch)
+        for k in losses:
+            if losses[k]>0:            
+                writer.add_scalar('Train/'+k,losses[k],epoch)            
+                print(k,':',losses[k])
+                #self.writer.flush()
+        tmp+= str(round(losses['all'],5))+'\t'
+        self.write_line2file('train',tmp)
+        writer.close()
+    def write_metrics(self,epoch,metrics,save=[],mode='Val',log=True):
+        tmp =str(epoch)+'\t'
+        print("validation epoch:",epoch)
+        writer = SummaryWriter(log_dir=self.log_dir)
+        for k in metrics:
+            if k in save:
+                tmp +=str(metrics[k])+'\t'
+            if log:
+                tag = mode+'/'+k            
+                writer.add_scalar(tag,metrics[k],epoch)
+                #self.writer.flush()
+            print(k,':',metrics[k])
+        
+        self.write_line2file('val',tmp)
+        writer.close()
+
+def iou_wt_center(bbox1,bbox2):
+    #only for torch, return a vector nx1
+    bbox1 = bbox1.view(-1,4)
+    bbox2 = bbox2.view(-1,4)
     
+    #tranfer xc,yc,w,h to xmin ymin xmax ymax
+    xmin1 = bbox1[:,0] - bbox1[:,2]/2
+    xmin2 = bbox2[:,0] - bbox2[:,2]/2
+    ymin1 = bbox1[:,1] - bbox1[:,3]/2
+    ymin2 = bbox2[:,1] - bbox2[:,3]/2
+    xmax1 = bbox1[:,0] + bbox1[:,2]/2
+    xmax2 = bbox2[:,0] + bbox2[:,2]/2
+    ymax1 = bbox1[:,1] + bbox1[:,3]/2
+    ymax2 = bbox2[:,1] + bbox2[:,3]/2
 
+    inter_xmin = torch.max(xmin1,xmin2)
+    inter_xmax = torch.min(xmax1,xmax2)
+    inter_ymin = torch.max(ymin1,ymin2)
+    inter_ymax = torch.min(ymax1,ymax2)
 
-    #choose the keypoint with the highest score
-def get_all_files(directory):
-    files = []
-
-    for f in os.listdir(directory):
-        if os.path.isfile(os.path.join(directory, f)):
-            files.append(os.path.join(directory, f))
-        else:
-            files.extend(get_all_files(os.path.join(directory, f)))
-    return files
-
-def calcAngularDistance(gt_rot, pr_rot):
-
-    rotDiff = np.dot(gt_rot, np.transpose(pr_rot))
-    trace = np.trace(rotDiff) 
-    return np.rad2deg(np.arccos((trace-1.0)/2.0))
-
-def get_camera_intrinsic():
-    K = np.zeros((3, 3), dtype='float64')
-    K[0, 0], K[0, 2] = 572.4114, 325.2611
-    K[1, 1], K[1, 2] = 573.5704, 242.0489
-    K[2, 2] = 1.
-    return K
-
-def compute_projection(points_3D, transformation, internal_calibration):
-    projections_2d = np.zeros((2, points_3D.shape[1]), dtype='float32')
-    camera_projection = (internal_calibration.dot(transformation)).dot(points_3D)
-    projections_2d[0, :] = camera_projection[0, :]/camera_projection[2, :]
-    projections_2d[1, :] = camera_projection[1, :]/camera_projection[2, :]
-    return projections_2d
-
-def compute_transformation(points_3D, transformation):
-    return transformation.dot(points_3D)
-
-def calc_pts_diameter(pts):
-    diameter = -1
-    for pt_id in range(pts.shape[0]):
-        pt_dup = np.tile(np.array([pts[pt_id, :]]), [pts.shape[0] - pt_id, 1])
-        pts_diff = pt_dup - pts[pt_id:, :]
-        max_dist = math.sqrt((pts_diff * pts_diff).sum(axis=1).max())
-        if max_dist > diameter:
-            diameter = max_dist
-    return diameter
-
-def adi(pts_est, pts_gt):
-    nn_index = spatial.cKDTree(pts_est)
-    nn_dists, _ = nn_index.query(pts_gt, k=1)
-    e = nn_dists.mean()
-    return e
-
-def get_3D_corners(vertices):
+    inter_w = inter_xmax-inter_xmin
+    inter_h = inter_ymax-inter_ymin
+    mask = ((inter_w>=0 )&( inter_h >=0)).to(torch.float)
     
-    min_x = np.min(vertices[0,:])
-    max_x = np.max(vertices[0,:])
-    min_y = np.min(vertices[1,:])
-    max_y = np.max(vertices[1,:])
-    min_z = np.min(vertices[2,:])
-    max_z = np.max(vertices[2,:])
-
-    corners = np.array([[min_x, min_y, min_z],
-                        [min_x, min_y, max_z],
-                        [min_x, max_y, min_z],
-                        [min_x, max_y, max_z],
-                        [max_x, min_y, min_z],
-                        [max_x, min_y, max_z],
-                        [max_x, max_y, min_z],
-                        [max_x, max_y, max_z]])
-
-    corners = np.concatenate((np.transpose(corners), np.ones((1,8)) ), axis=0)
-    return corners
-
-def pnp(points_3D, points_2D, cameraMatrix):
-    try:
-        distCoeffs = pnp.distCoeffs
-    except:
-        distCoeffs = np.zeros((8, 1), dtype='float32')
-
-    assert points_2D.shape[0] == points_2D.shape[0], 'points 3D and points 2D must have same number of vertices'
-
-    _, R_exp, t = cv2.solvePnP(points_3D,
-                              # points_2D,
-                              np.ascontiguousarray(points_2D[:,:2]).reshape((-1,1,2)),
-                              cameraMatrix,
-                              distCoeffs)
-                              # , None, None, False, cv2.SOLVEPNP_UPNP)
-                                
-    # _,R_exp, t, _ = cv2.solvePnPRansac(points_3D,
-    #                            points_2D,
-    #                            cameraMatrix,
-    #                            distCoeffs,
-    #                            reprojectionError=12.0)
-    # 
-
-    R, _ = cv2.Rodrigues(R_exp)
-    # Rt = np.c_[R, t]
-    return R, t
-
-def get_2d_bb(box, size):
-    x = box[0]
-    y = box[1]
-    min_x = np.min(np.reshape(box, [9,2])[:,0])
-    max_x = np.max(np.reshape(box, [9,2])[:,0])
-    min_y = np.min(np.reshape(box, [9,2])[:,1])
-    max_y = np.max(np.reshape(box, [9,2])[:,1])
-    w = max_x - min_x
-    h = max_y - min_y
-    new_box = [x*size, y*size, w*size, h*size]
-    return new_box
-
-def compute_2d_bb(pts):
-    min_x = np.min(pts[0,:])
-    max_x = np.max(pts[0,:])
-    min_y = np.min(pts[1,:])
-    max_y = np.max(pts[1,:])
-    w  = max_x - min_x
-    h  = max_y - min_y
-    cx = (max_x + min_x) / 2.0
-    cy = (max_y + min_y) / 2.0
-    new_box = [cx, cy, w, h]
-    return new_box
-
-def compute_2d_bb_from_orig_pix(pts, size):
-    min_x = np.min(pts[0,:]) / 640.0
-    max_x = np.max(pts[0,:]) / 640.0
-    min_y = np.min(pts[1,:]) / 480.0
-    max_y = np.max(pts[1,:]) / 480.0
-    w  = max_x - min_x
-    h  = max_y - min_y
-    cx = (max_x + min_x) / 2.0
-    cy = (max_y + min_y) / 2.0
-    new_box = [cx*size, cy*size, w*size, h*size]
-    return new_box
-
-def bbox_iou(box1, box2, x1y1x2y2=False):
-    if x1y1x2y2:
-        mx = min(box1[0], box2[0])
-        Mx = max(box1[2], box2[2])
-        my = min(box1[1], box2[1])
-        My = max(box1[3], box2[3])
-        w1 = box1[2] - box1[0]
-        h1 = box1[3] - box1[1]
-        w2 = box2[2] - box2[0]
-        h2 = box2[3] - box2[1]
-    else:
-        mx = min(box1[0]-box1[2]/2.0, box2[0]-box2[2]/2.0)
-        Mx = max(box1[0]+box1[2]/2.0, box2[0]+box2[2]/2.0)
-        my = min(box1[1]-box1[3]/2.0, box2[1]-box2[3]/2.0)
-        My = max(box1[1]+box1[3]/2.0, box2[1]+box2[3]/2.0)
-        w1 = box1[2]
-        h1 = box1[3]
-        w2 = box2[2]
-        h2 = box2[3]
-    uw = Mx - mx
-    uh = My - my
-    cw = w1 + w2 - uw
-    ch = h1 + h2 - uh
-    carea = 0
-    if cw <= 0 or ch <= 0:
-        return 0.0
-
-    area1 = w1 * h1
-    area2 = w2 * h2
-    carea = cw * ch
-    uarea = area1 + area2 - carea
-    return carea/uarea
-
-def corner_confidences9(gt_corners, pr_corners, th=30, sharpness=2, im_width=640, im_height=480):
-    ''' gt_corners: Ground-truth 2D projections of the 3D bounding box corners, shape: (16 x nA), type: torch.FloatTensor
-        pr_corners: Prediction for the 2D projections of the 3D bounding box corners, shape: (16 x nA), type: torch.FloatTensor
-        th        : distance threshold, type: int
-        sharpness : sharpness of the exponential that assigns a confidence value to the distance
-        -----------
-        return    : a torch.FloatTensor of shape (nA,) with 9 confidence values 
-    '''
-    shape = gt_corners.size()
-    nA = shape[1]  
-    dist = gt_corners - pr_corners
-    dist = dist.t().contiguous().view(nA, 9, 2)
-    dist[:, :, 0] = dist[:, :, 0] * im_width
-    dist[:, :, 1] = dist[:, :, 1] * im_height
-
-    eps = 1e-5
-    distthresh = torch.FloatTensor([th]).repeat(nA, 9) 
-    dist = torch.sqrt(torch.sum((dist)**2, dim=2)).squeeze() # nA x 9
-    mask = (dist < distthresh).type(torch.FloatTensor)
-    conf = torch.exp(sharpness*(1 - dist/distthresh))-1  # mask * (torch.exp(math.log(2) * (1.0 - dist/rrt)) - 1)
-    conf0 = torch.exp(sharpness*(1 - torch.zeros(conf.size(0),1))) - 1
-    conf = conf / conf0.repeat(1, 9)
-    # conf = 1 - dist/distthresh
-    conf = mask * conf  # nA x 9
-    mean_conf = torch.mean(conf, dim=1)
-    return mean_conf
-
-def corner_confidence9(gt_corners, pr_corners, th=30, sharpness=2, im_width=640, im_height=480):
-    ''' gt_corners: Ground-truth 2D projections of the 3D bounding box corners, shape: (18,) type: list
-        pr_corners: Prediction for the 2D projections of the 3D bounding box corners, shape: (18,), type: list
-        th        : distance threshold, type: int
-        sharpness : sharpness of the exponential that assigns a confidence value to the distance
-        -----------
-        return    : a list of shape (9,) with 9 confidence values 
-    '''
-    dist = torch.FloatTensor(gt_corners) - pr_corners
-    dist = dist.view(9, 2)
-    dist[:, 0] = dist[:, 0] * im_width
-    dist[:, 1] = dist[:, 1] * im_height
-    eps = 1e-5
-    dist  = torch.sqrt(torch.sum((dist)**2, dim=1))
-    mask  = (dist < th).type(torch.FloatTensor)
-    conf  = torch.exp(sharpness * (1.0 - dist/th)) - 1
-    conf0 = torch.exp(torch.FloatTensor([sharpness])) - 1 + eps
-    conf  = conf / conf0.repeat(9, 1)
-    # conf = 1.0 - dist/th
-    conf  = mask * conf 
-    return torch.mean(conf)
-
-def sigmoid(x):
-    return 1.0/(math.exp(-x)+1.)
-
-def softmax(x):
-    x = torch.exp(x - torch.max(x))
-    x = x/x.sum()
-    return x
-
-def nms(boxes, nms_thresh):
-    if len(boxes) == 0:
-        return boxes
-
-    det_confs = torch.zeros(len(boxes))
-    for i in range(len(boxes)):
-        det_confs[i] = 1-boxes[i][4]                
-
-    _,sortIds = torch.sort(det_confs)
-    out_boxes = []
-    for i in range(len(boxes)):
-        box_i = boxes[sortIds[i]]
-        if box_i[4] > 0:
-            out_boxes.append(box_i)
-            for j in range(i+1, len(boxes)):
-                box_j = boxes[sortIds[j]]
-                if bbox_iou(box_i, box_j, x1y1x2y2=False) > nms_thresh:
-                    #print(box_i, box_j, bbox_iou(box_i, box_j, x1y1x2y2=False))
-                    box_j[4] = 0
-    return out_boxes
-
-def fix_corner_order(corners2D_gt):
-    corners2D_gt_corrected = np.zeros((9, 2), dtype='float32')
-    corners2D_gt_corrected[0, :] = corners2D_gt[0, :]
-    corners2D_gt_corrected[1, :] = corners2D_gt[1, :]
-    corners2D_gt_corrected[2, :] = corners2D_gt[3, :]
-    corners2D_gt_corrected[3, :] = corners2D_gt[5, :]
-    corners2D_gt_corrected[4, :] = corners2D_gt[7, :]
-    corners2D_gt_corrected[5, :] = corners2D_gt[2, :]
-    corners2D_gt_corrected[6, :] = corners2D_gt[4, :]
-    corners2D_gt_corrected[7, :] = corners2D_gt[6, :]
-    corners2D_gt_corrected[8, :] = corners2D_gt[8, :]
-    return corners2D_gt_corrected
-
-def convert2cpu(gpu_matrix):
-    return torch.FloatTensor(gpu_matrix.size()).copy_(gpu_matrix)
-
-def convert2cpu_long(gpu_matrix):
-    return torch.LongTensor(gpu_matrix.size()).copy_(gpu_matrix)
-def get_corresponding_region_boxes(output, conf_thresh, num_classes, anchors, num_anchors, correspondingclass, only_objectness=1, validation=False):
+    # detect not overlap
     
-    # Parameters
-    if output.dim() == 3:
-        output = output.unsqueeze(0)
-    batch = output.size(0)
-    assert(output.size(1) == (19+num_classes)*num_anchors)
-    h = output.size(2)
-    w = output.size(3)
+    #inter_h[inter_h<0] = 0
+    inter = inter_w*inter_h*mask
+    #keep iou<0 to avoid gradient diasppear
+    area1 = bbox1[:,2]*bbox1[:,3]
+    area2 = bbox2[:,2]*bbox2[:,3]
+    union = area1+area2 - inter
+    ious = inter/union
+    ious[ious!=ious] = torch.tensor(0.0,device=bbox1.device)
+    return ious
+def iou_wt_center_np(bbox1,bbox2):
+    #in numpy,only for evaluation,return a matrix m x n
+    bbox1 = bbox1.reshape(-1,4)
+    bbox2 = bbox2.reshape(-1,4)
 
-    # Activation
-    t0 = time.time()
-    all_boxes = []
-    max_conf = -100000
-    max_cls_conf = -100000
-    output    = output.view(batch*num_anchors, 19+num_classes, h*w).transpose(0,1).contiguous().view(19+num_classes, batch*num_anchors*h*w)
-    grid_x    = torch.linspace(0, w-1, w).repeat(h,1).repeat(batch*num_anchors, 1, 1).view(batch*num_anchors*h*w)
-    grid_y    = torch.linspace(0, h-1, h).repeat(w,1).t().repeat(batch*num_anchors, 1, 1).view(batch*num_anchors*h*w)
-    xs0       = output[0] + grid_x
-    ys0       = output[1] + grid_y
-    xs1       = output[2] + grid_x
-    ys1       = output[3] + grid_y
-    xs2       = output[4] + grid_x
-    ys2       = output[5] + grid_y
-    xs3       = output[6] + grid_x
-    ys3       = output[7] + grid_y
-    xs4       = output[8] + grid_x
-    ys4       = output[9] + grid_y
-    xs5       = output[10] + grid_x
-    ys5       = output[11] + grid_y
-    xs6       = output[12] + grid_x
-    ys6       = output[13] + grid_y
-    xs7       = output[14] + grid_x
-    ys7       = output[15] + grid_y
-    xs8       = output[16] + grid_x
-    ys8       = output[17] + grid_y
-    det_confs = torch.sigmoid(output[18])
-    cls_confs = torch.nn.Softmax()(Variable(output[19:19+num_classes].transpose(0,1))).data
-    cls_max_confs, cls_max_ids = torch.max(cls_confs, 1)
-    cls_max_confs = cls_max_confs.view(-1)
-    cls_max_ids   = cls_max_ids.view(-1)
-    t1 = time.time()
     
-    # GPU to CPU
-    sz_hw = h*w
-    sz_hwa = sz_hw*num_anchors
-    det_confs = convert2cpu(det_confs)
-    cls_max_confs = convert2cpu(cls_max_confs)
-    cls_max_ids = convert2cpu_long(cls_max_ids)
-    xs0 = convert2cpu(xs0)
-    ys0 = convert2cpu(ys0)
-    xs1 = convert2cpu(xs1)
-    ys1 = convert2cpu(ys1)
-    xs2 = convert2cpu(xs2)
-    ys2 = convert2cpu(ys2)
-    xs3 = convert2cpu(xs3)
-    ys3 = convert2cpu(ys3)
-    xs4 = convert2cpu(xs4)
-    ys4 = convert2cpu(ys4)
-    xs5 = convert2cpu(xs5)
-    ys5 = convert2cpu(ys5)
-    xs6 = convert2cpu(xs6)
-    ys6 = convert2cpu(ys6)
-    xs7 = convert2cpu(xs7)
-    ys7 = convert2cpu(ys7)
-    xs8 = convert2cpu(xs8)
-    ys8 = convert2cpu(ys8)
-    if validation:
-        cls_confs = convert2cpu(cls_confs.view(-1, num_classes))
-    t2 = time.time()
+    #tranfer xc,yc,w,h to xmin ymin xmax ymax
+    xmin1 = bbox1[:,0] - bbox1[:,2]/2
+    xmin2 = bbox2[:,0] - bbox2[:,2]/2
+    ymin1 = bbox1[:,1] - bbox1[:,3]/2
+    ymin2 = bbox2[:,1] - bbox2[:,3]/2
+    xmax1 = bbox1[:,0] + bbox1[:,2]/2
+    xmax2 = bbox2[:,0] + bbox2[:,2]/2
+    ymax1 = bbox1[:,1] + bbox1[:,3]/2
+    ymax2 = bbox2[:,1] + bbox2[:,3]/2
 
-    # Boxes filter
-    for b in range(batch):
-        boxes = []
-        max_conf = -1
-        for cy in range(h):
-            for cx in range(w):
-                for i in range(num_anchors):
-                    ind = b*sz_hwa + i*sz_hw + cy*w + cx
-                    det_conf =  det_confs[ind]
-                    if only_objectness:
-                        conf = det_confs[ind]
-                    else:
-                        conf = det_confs[ind] * cls_max_confs[ind]
-                    
-                    if (det_confs[ind] > max_conf) and (cls_confs[ind, correspondingclass] > max_cls_conf):
-                        max_conf = det_confs[ind]
-                        max_cls_conf = cls_confs[ind, correspondingclass]
-                        max_ind = ind                  
+    #trigger broadcasting
+    inter_xmin = np.maximum(xmin1.reshape(-1,1),xmin2.reshape(1,-1))
+    inter_xmax = np.minimum(xmax1.reshape(-1,1),xmax2.reshape(1,-1))
+    inter_ymin = np.maximum(ymin1.reshape(-1,1),ymin2.reshape(1,-1))
+    inter_ymax = np.minimum(ymax1.reshape(-1,1),ymax2.reshape(1,-1))
     
-                    if conf > conf_thresh:
-                        bcx0 = xs0[ind]
-                        bcy0 = ys0[ind]
-                        bcx1 = xs1[ind]
-                        bcy1 = ys1[ind]
-                        bcx2 = xs2[ind]
-                        bcy2 = ys2[ind]
-                        bcx3 = xs3[ind]
-                        bcy3 = ys3[ind]
-                        bcx4 = xs4[ind]
-                        bcy4 = ys4[ind]
-                        bcx5 = xs5[ind]
-                        bcy5 = ys5[ind]
-                        bcx6 = xs6[ind]
-                        bcy6 = ys6[ind]
-                        bcx7 = xs7[ind]
-                        bcy7 = ys7[ind]
-                        bcx8 = xs8[ind]
-                        bcy8 = ys8[ind]
-                        cls_max_conf = cls_max_confs[ind]
-                        cls_max_id = cls_max_ids[ind]
-                        box = [bcx0/w, bcy0/h, bcx1/w, bcy1/h, bcx2/w, bcy2/h, bcx3/w, bcy3/h, bcx4/w, bcy4/h, bcx5/w, bcy5/h, bcx6/w, bcy6/h, bcx7/w, bcy7/h, bcx8/w, bcy8/h, det_conf, cls_max_conf, cls_max_id]
-                        if (not only_objectness) and validation:
-                            for c in range(num_classes):
-                                tmp_conf = cls_confs[ind][c]
-                                if c != cls_max_id and det_confs[ind]*tmp_conf > conf_thresh:
-                                    box.append(tmp_conf)
-                                    box.append(c)
-                        boxes.append(box)
-        boxesnp = np.array(boxes)
-        if (len(boxes) == 0) or (not (correspondingclass in boxesnp[:,20])):
-            bcx0 = xs0[max_ind]
-            bcy0 = ys0[max_ind]
-            bcx1 = xs1[max_ind]
-            bcy1 = ys1[max_ind]
-            bcx2 = xs2[max_ind]
-            bcy2 = ys2[max_ind]
-            bcx3 = xs3[max_ind]
-            bcy3 = ys3[max_ind]
-            bcx4 = xs4[max_ind]
-            bcy4 = ys4[max_ind]
-            bcx5 = xs5[max_ind]
-            bcy5 = ys5[max_ind]
-            bcx6 = xs6[max_ind]
-            bcy6 = ys6[max_ind]
-            bcx7 = xs7[max_ind]
-            bcy7 = ys7[max_ind]
-            bcx8 = xs8[max_ind]
-            bcy8 = ys8[max_ind]
-            cls_max_conf = max_cls_conf # cls_max_confs[max_ind]
-            cls_max_id = correspondingclass # cls_max_ids[max_ind]
-            det_conf = max_conf # det_confs[max_ind]
-            box = [bcx0/w, bcy0/h, bcx1/w, bcy1/h, bcx2/w, bcy2/h, bcx3/w, bcy3/h, bcx4/w, bcy4/h, bcx5/w, bcy5/h, bcx6/w, bcy6/h, bcx7/w, bcy7/h, bcx8/w, bcy8/h, det_conf, cls_max_conf, cls_max_id]
-            boxes.append(box)
-            # print(boxes)
-            all_boxes.append(boxes)
-        else:
-            all_boxes.append(boxes)
-
-    t3 = time.time()
-    if False:
-        print('---------------------------------')
-        print('matrix computation : %f' % (t1-t0))
-        print('        gpu to cpu : %f' % (t2-t1))
-        print('      boxes filter : %f' % (t3-t2))
-        print('---------------------------------')
-    return all_boxes
-def get_region_boxes(output, conf_thresh, num_classes, only_objectness=1, validation=False):
+    inter_w = inter_xmax-inter_xmin
+    inter_h = inter_ymax-inter_ymin
+    mask = ((inter_w>=0 )&( inter_h >=0))
     
-    # Parameters
-    anchor_dim = 1 
-    if output.dim() == 3:
-        output = output.unsqueeze(0)
-    batch = output.size(0)
-    assert(output.size(1) == (19+num_classes)*anchor_dim)
-    h = output.size(2)
-    w = output.size(3)
+    #inter_h[inter_h<0] = 0
+    inter = inter_w*inter_h*mask.astype(float)
+    area1 = ((ymax1-ymin1)*(xmax1-xmin1)).reshape(-1,1)
+    area2 = ((ymax2-ymin2)*(xmax2-xmin2)).reshape(1,-1)
+    union = area1+area2 - inter
+    ious = inter/union
+    ious[ious!=ious] = 0
+    return ious
 
-    # Activation
-    t0 = time.time()
-    all_boxes = []
-    max_conf = -100000
-    output    = output.view(batch*anchor_dim, 19+num_classes, h*w).transpose(0,1).contiguous().view(19+num_classes, batch*anchor_dim*h*w)
-    grid_x    = torch.linspace(0, w-1, w).repeat(h,1).repeat(batch*anchor_dim, 1, 1).view(batch*anchor_dim*h*w)
-    grid_y    = torch.linspace(0, h-1, h).repeat(w,1).t().repeat(batch*anchor_dim, 1, 1).view(batch*anchor_dim*h*w)
-    xs0       = torch.sigmoid(output[0]) + grid_x
-    ys0       = torch.sigmoid(output[1]) + grid_y
-    xs1       = output[2] + grid_x
-    ys1       = output[3] + grid_y
-    xs2       = output[4] + grid_x
-    ys2       = output[5] + grid_y
-    xs3       = output[6] + grid_x
-    ys3       = output[7] + grid_y
-    xs4       = output[8] + grid_x
-    ys4       = output[9] + grid_y
-    xs5       = output[10] + grid_x
-    ys5       = output[11] + grid_y
-    xs6       = output[12] + grid_x
-    ys6       = output[13] + grid_y
-    xs7       = output[14] + grid_x
-    ys7       = output[15] + grid_y
-    xs8       = output[16] + grid_x
-    ys8       = output[17] + grid_y
-    det_confs = torch.sigmoid(output[18])
-    cls_confs = torch.nn.Softmax()(Variable(output[19:19+num_classes].transpose(0,1))).data
-    cls_max_confs, cls_max_ids = torch.max(cls_confs, 1)
-    cls_max_confs = cls_max_confs.view(-1)
-    cls_max_ids   = cls_max_ids.view(-1)
-    t1 = time.time()
-    
-    # GPU to CPU
-    sz_hw = h*w
-    sz_hwa = sz_hw*anchor_dim
-    det_confs = convert2cpu(det_confs)
-    cls_max_confs = convert2cpu(cls_max_confs)
-    cls_max_ids = convert2cpu_long(cls_max_ids)
-    xs0 = convert2cpu(xs0)
-    ys0 = convert2cpu(ys0)
-    xs1 = convert2cpu(xs1)
-    ys1 = convert2cpu(ys1)
-    xs2 = convert2cpu(xs2)
-    ys2 = convert2cpu(ys2)
-    xs3 = convert2cpu(xs3)
-    ys3 = convert2cpu(ys3)
-    xs4 = convert2cpu(xs4)
-    ys4 = convert2cpu(ys4)
-    xs5 = convert2cpu(xs5)
-    ys5 = convert2cpu(ys5)
-    xs6 = convert2cpu(xs6)
-    ys6 = convert2cpu(ys6)
-    xs7 = convert2cpu(xs7)
-    ys7 = convert2cpu(ys7)
-    xs8 = convert2cpu(xs8)
-    ys8 = convert2cpu(ys8)
-    if validation:
-        cls_confs = convert2cpu(cls_confs.view(-1, num_classes))
-    t2 = time.time()
+def ap_per_class(tp, conf, pred_cls, target_cls,plot=False):
+    """ Compute the average precision, given the recall and precision curves.
+    Source: https://github.com/rafaelpadilla/Object-Detection-Metrics.
+    # Arguments
+        tp:    True positives (list).
+        conf:  Objectness value from 0-1 (list).
+        pred_cls: Predicted object classes (list).
+        target_cls: True object classes (list).
+    # Returns
+        The average precision as computed in py-faster-rcnn.
+    """
 
-    # Boxes filter
-    for b in range(batch):
-        boxes = []
-        max_conf = -1
-        for cy in range(h):
-            for cx in range(w):
-                for i in range(anchor_dim):
-                    ind = b*sz_hwa + i*sz_hw + cy*w + cx
-                    det_conf =  det_confs[ind]
-                    if only_objectness:
-                        conf = det_confs[ind]
-                    else:
-                        conf = det_confs[ind] * cls_max_confs[ind]
-                    
-                    if conf > max_conf:
-                        max_conf = conf
-                        max_ind = ind                  
-    
-                    if conf > conf_thresh:
-                        bcx0 = xs0[ind]
-                        bcy0 = ys0[ind]
-                        bcx1 = xs1[ind]
-                        bcy1 = ys1[ind]
-                        bcx2 = xs2[ind]
-                        bcy2 = ys2[ind]
-                        bcx3 = xs3[ind]
-                        bcy3 = ys3[ind]
-                        bcx4 = xs4[ind]
-                        bcy4 = ys4[ind]
-                        bcx5 = xs5[ind]
-                        bcy5 = ys5[ind]
-                        bcx6 = xs6[ind]
-                        bcy6 = ys6[ind]
-                        bcx7 = xs7[ind]
-                        bcy7 = ys7[ind]
-                        bcx8 = xs8[ind]
-                        bcy8 = ys8[ind]
-                        cls_max_conf = cls_max_confs[ind]
-                        cls_max_id = cls_max_ids[ind]
-                        box = [bcx0/w, bcy0/h, bcx1/w, bcy1/h, bcx2/w, bcy2/h, bcx3/w, bcy3/h, bcx4/w, bcy4/h, bcx5/w, bcy5/h, bcx6/w, bcy6/h, bcx7/w, bcy7/h, bcx8/w, bcy8/h, det_conf, cls_max_conf, cls_max_id]
-                        if (not only_objectness) and validation:
-                            for c in range(num_classes):
-                                tmp_conf = cls_confs[ind][c]
-                                if c != cls_max_id and det_confs[ind]*tmp_conf > conf_thresh:
-                                    box.append(tmp_conf)
-                                    box.append(c)
-                        boxes.append(box)
-            if len(boxes) == 0:
-                bcx0 = xs0[max_ind]
-                bcy0 = ys0[max_ind]
-                bcx1 = xs1[max_ind]
-                bcy1 = ys1[max_ind]
-                bcx2 = xs2[max_ind]
-                bcy2 = ys2[max_ind]
-                bcx3 = xs3[max_ind]
-                bcy3 = ys3[max_ind]
-                bcx4 = xs4[max_ind]
-                bcy4 = ys4[max_ind]
-                bcx5 = xs5[max_ind]
-                bcy5 = ys5[max_ind]
-                bcx6 = xs6[max_ind]
-                bcy6 = ys6[max_ind]
-                bcx7 = xs7[max_ind]
-                bcy7 = ys7[max_ind]
-                bcx8 = xs8[max_ind]
-                bcy8 = ys8[max_ind]
-                cls_max_conf = cls_max_confs[max_ind]
-                cls_max_id = cls_max_ids[max_ind]
-                det_conf =  det_confs[max_ind]
-                box = [bcx0/w, bcy0/h, bcx1/w, bcy1/h, bcx2/w, bcy2/h, bcx3/w, bcy3/h, bcx4/w, bcy4/h, bcx5/w, bcy5/h, bcx6/w, bcy6/h, bcx7/w, bcy7/h, bcx8/w, bcy8/h, det_conf, cls_max_conf, cls_max_id]
-                boxes.append(box)
-                all_boxes.append(boxes)
-            else:
-                all_boxes.append(boxes)
+    # Sort by objectness
+    i = np.argsort(-conf)
+    tp, conf, pred_cls = tp[i], conf[i], pred_cls[i]
 
-        all_boxes.append(boxes)
-    t3 = time.time()
-    if False:
-        print('---------------------------------')
-        print('matrix computation : %f' % (t1-t0))
-        print('        gpu to cpu : %f' % (t2-t1))
-        print('      boxes filter : %f' % (t3-t2))
-        print('---------------------------------')
-    return all_boxes
+    # Find unique classes
+    unique_classes = np.unique(target_cls)
 
+    # Create Precision-Recall curve and compute AP for each class
+    ap, p, r = [], [], []
+    for c in unique_classes:
+        i = pred_cls == c
+        n_gt = (target_cls == c).sum()  # Number of ground truth objects
+        n_p = i.sum()  # Number of predicted objects
 
-
-def plot_boxes_cv2(img, boxes, savename=None, class_names=None, color=None):
-    import cv2
-    colors = torch.FloatTensor([[1,0,1],[0,0,1],[0,1,1],[0,1,0],[1,1,0],[1,0,0]]);
-    def get_color(c, x, max_val):
-        ratio = float(x)/max_val * 5
-        i = int(math.floor(ratio))
-        j = int(math.ceil(ratio))
-        ratio = ratio - i
-        r = (1-ratio) * colors[i][c] + ratio*colors[j][c]
-        return int(r*255)
-
-    width = img.shape[1]
-    height = img.shape[0]
-    for i in range(len(boxes)):
-        box = boxes[i]
-        x1 = int(round((box[0] - box[2]/2.0) * width))
-        y1 = int(round((box[1] - box[3]/2.0) * height))
-        x2 = int(round((box[0] + box[2]/2.0) * width))
-        y2 = int(round((box[1] + box[3]/2.0) * height))
-
-        if color:
-            rgb = color
-        else:
-            rgb = (255, 0, 0)
-        if len(box) >= 7 and class_names:
-            cls_conf = box[5]
-            cls_id = box[6]
-            print('%s: %f' % (class_names[cls_id], cls_conf))
-            classes = len(class_names)
-            offset = cls_id * 123457 % classes
-            red   = get_color(2, offset, classes)
-            green = get_color(1, offset, classes)
-            blue  = get_color(0, offset, classes)
-            if color is None:
-                rgb = (red, green, blue)
-            img = cv2.putText(img, class_names[cls_id], (x1,y1), cv2.FONT_HERSHEY_SIMPLEX, 1.2, rgb, 1)
-        img = cv2.rectangle(img, (x1,y1), (x2,y2), rgb, 1)
-    if savename:
-        print("save plot results to %s" % savename)
-        cv2.imwrite(savename, img)
-    return img
-
-def plot_boxes(img, boxes, savename=None, class_names=None):
-    colors = torch.FloatTensor([[1,0,1],[0,0,1],[0,1,1],[0,1,0],[1,1,0],[1,0,0]]);
-    def get_color(c, x, max_val):
-        ratio = float(x)/max_val * 5
-        i = int(math.floor(ratio))
-        j = int(math.ceil(ratio))
-        ratio = ratio - i
-        r = (1-ratio) * colors[i][c] + ratio*colors[j][c]
-        return int(r*255)
-
-    width = img.width
-    height = img.height
-    draw = ImageDraw.Draw(img)
-    for i in range(len(boxes)):
-        box = boxes[i]
-        x1 = (box[0] - box[2]/2.0) * width
-        y1 = (box[1] - box[3]/2.0) * height
-        x2 = (box[0] + box[2]/2.0) * width
-        y2 = (box[1] + box[3]/2.0) * height
-
-        rgb = (255, 0, 0)
-        if len(box) >= 7 and class_names:
-            cls_conf = box[5]
-            cls_id = box[6]
-            print('%s: %f' % (class_names[cls_id], cls_conf))
-            classes = len(class_names)
-            offset = cls_id * 123457 % classes
-            red   = get_color(2, offset, classes)
-            green = get_color(1, offset, classes)
-            blue  = get_color(0, offset, classes)
-            rgb = (red, green, blue)
-            draw.text((x1, y1), class_names[cls_id], fill=rgb)
-        draw.rectangle([x1, y1, x2, y2], outline = rgb)
-    if savename:
-        print("save plot results to %s" % savename)
-        img.save(savename)
-    return img
-
-def read_truths(lab_path):
-    if os.path.getsize(lab_path):
-        truths = np.loadtxt(lab_path)
-        truths = truths.reshape(truths.size//21, 21) # to avoid single truth problem
-        return truths
-    else:
-        return np.array([])
-
-def read_truths_args(lab_path):
-    truths = read_truths(lab_path)
-    new_truths = []
-    for i in range(truths.shape[0]):
-        new_truths.append([truths[i][0], truths[i][1], truths[i][2], truths[i][3], truths[i][4], 
-            truths[i][5], truths[i][6], truths[i][7], truths[i][8], truths[i][9], truths[i][10], 
-            truths[i][11], truths[i][12], truths[i][13], truths[i][14], truths[i][15], truths[i][16], truths[i][17], truths[i][18],0,0])
-    return np.array(new_truths)
-
-def read_pose(lab_path):
-    if os.path.getsize(lab_path):
-        truths = np.loadtxt(lab_path)
-        # truths = truths.reshape(truths.size/21, 21) # to avoid single truth problem
-        return truths
-    else:
-        return np.array([])
-
-def load_class_names(namesfile):
-    class_names = []
-    with open(namesfile, 'r') as fp:
-        lines = fp.readlines()
-    for line in lines:
-        line = line.rstrip()
-        class_names.append(line)
-    return class_names
-
-def image2torch(img):
-    width = img.width
-    height = img.height
-    img = torch.ByteTensor(torch.ByteStorage.from_buffer(img.tobytes()))
-    img = img.view(height, width, 3).transpose(0,1).transpose(0,2).contiguous()
-    img = img.view(1, 3, height, width)
-    img = img.float().div(255.0)
-    return img
-
-
-def read_data_cfg(datacfg):
-    options = dict()
-    options['gpus'] = '0,1,2,3'
-    options['num_workers'] = '10'
-    with open(datacfg, 'r') as fp:
-        lines = fp.readlines()
-
-    for line in lines:
-        line = line.strip()
-        if line == '':
+        if n_p == 0 and n_gt == 0:
             continue
-        key,value = line.split('=')
-        key = key.strip()
-        value = value.strip()
-        options[key] = value
-    return options
-
-def scale_bboxes(bboxes, width, height):
-    import copy
-    dets = copy.deepcopy(bboxes)
-    for i in range(len(dets)):
-        dets[i][0] = dets[i][0] * width
-        dets[i][1] = dets[i][1] * height
-        dets[i][2] = dets[i][2] * width
-        dets[i][3] = dets[i][3] * height
-    return dets
-      
-def file_lines(thefilepath):
-    count = 0
-    thefile = open(thefilepath, 'rb')
-    while True:
-        buffer = thefile.read(8192*1024)
-        if not buffer:
-            break
-        count += buffer.count(b'\n')
-    thefile.close( )
-    return count
-
-def get_image_size(fname):
-    '''Determine the image type of fhandle and return its size.
-    from draco'''
-    with open(fname, 'rb') as fhandle:
-        head = fhandle.read(24)
-        if len(head) != 24: 
-            return
-        if imghdr.what(fname) == 'png':
-            check = struct.unpack('>i', head[4:8])[0]
-            if check != 0x0d0a1a0a:
-                return
-            width, height = struct.unpack('>ii', head[16:24])
-        elif imghdr.what(fname) == 'gif':
-            width, height = struct.unpack('<HH', head[6:10])
-        elif imghdr.what(fname) == 'jpeg' or imghdr.what(fname) == 'jpg':
-            try:
-                fhandle.seek(0) # Read 0xff next
-                size = 2 
-                ftype = 0 
-                while not 0xc0 <= ftype <= 0xcf:
-                    fhandle.seek(size, 1)
-                    byte = fhandle.read(1)
-                    while ord(byte) == 0xff:
-                        byte = fhandle.read(1)
-                    ftype = ord(byte)
-                    size = struct.unpack('>H', fhandle.read(2))[0] - 2 
-                # We are at a SOFn block
-                fhandle.seek(1, 1)  # Skip `precision' byte.
-                height, width = struct.unpack('>HH', fhandle.read(4))
-            except Exception: #IGNORE:W0703
-                return
+        elif n_p == 0 or n_gt == 0:
+            ap.append(0)
+            r.append(0)
+            p.append(0)
         else:
-            return
-        return width, height
+            # Accumulate FPs and TPs
+            fpc = (1 - tp[i]).cumsum()
+            tpc = (tp[i]).cumsum()
 
-def logging(message):
-    print('%s %s' % (time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()), message))
+            # Recall
+            recall_curve = tpc / (n_gt + 1e-16)
+            r.append(recall_curve[-1])
 
-def read_pose(lab_path):
-    if os.path.getsize(lab_path):
-        truths = np.loadtxt(lab_path)
-        return truths
+            # Precision
+            precision_curve = tpc / (tpc + fpc)
+            p.append(precision_curve[-1])
+
+            # AP from recall-precision curve
+            if plot:
+                plt.plot(recall_curve,precision_curve)
+            ap.append(compute_ap(recall_curve, precision_curve))
+
+    # Compute F1 score (harmonic mean of precision and recall)
+    p, r, ap = np.array(p), np.array(r), np.array(ap)
+    f1 = 2 * p * r / (p + r + 1e-16)
+
+    return p, r, ap, f1, unique_classes.astype("int32")
+
+def compute_ap(recall, precision):
+    """ Compute the average precision, given the recall and precision curves.
+    Code originally from https://github.com/rbgirshick/py-faster-rcnn.
+
+    # Arguments
+        recall:    The recall curve (list).
+        precision: The precision curve (list).
+    # Returns
+        The average precision as computed in py-faster-rcnn.
+    """
+    # correct AP calculation
+    # first append sentinel values at the end
+    mrec = np.concatenate(([0.0], recall, [1.0]))
+    mpre = np.concatenate(([1.0], precision, [0.0]))
+
+    # compute the precision envelope
+    for i in range(mpre.size - 1, 0, -1):
+        mpre[i - 1] = np.maximum(mpre[i - 1], mpre[i])
+
+    # to calculate area under PR curve, look for points
+    # where X axis (recall) changes value
+    i = np.where(mrec[1:] != mrec[:-1])[0]
+
+    # and sum (\Delta recall) * prec
+    ap = np.sum((mrec[i + 1] - mrec[i]) * mpre[i + 1])
+    return ap
+
+def cal_tp_per_item(pds,gts,threshold=0.5):
+    assert (len(pds.shape)>1) and (len(gts.shape)>1)
+    pds = pds.cpu().numpy()
+    gts = gts.cpu().numpy()
+    n = pds.shape[0]
+    tps = np.zeros(n)
+    labels = np.unique(gts[:,0].astype(np.int))
+    scores = pds[:,4]*pds[:,5]
+    idx = np.argsort(-scores)
+    scores = scores[idx]
+    pds = pds[idx]
+    ##print(len(labels))
+    for c in labels:
+        pd_idx = np.where(pds[:-1]==c)[0]
+        pdbboxes = pds[pd_idx,:4].reshape(-1,4)
+        gtbboxes = gts[gts[:,0] == c,1:].reshape(-1,4)
+        ##print(voc_indices[int(c)])
+        ##print(pdbboxes)
+        ##print(gtbboxes)
+        nc = pdbboxes.shape[0]
+        mc = gtbboxes.shape[0]
+        selected = np.zeros(mc)
+        sel_ious = np.zeros(mc)
+        for i in range(nc):
+            if mc == 0:
+                break
+            pdbbox = pdbboxes[i]
+            ious = iou_wt_center_np(pdbbox,gtbboxes)
+            iou = ious.max()
+            best = ious.argmax()
+            ##print(iou)
+            if iou >=threshold  and selected[best] !=1:
+                selected[best] = 1
+                tps[pd_idx[i]] = 1.0
+                mc -=1
+                sel_ious[best] = iou         
+    return [tps,scores,pds[:,-1]]
+def cal_tp_per_item_wo_cls(pds,gts,threshold=0.5):
+    assert (len(pds.shape)>1) and (len(gts.shape)>1)
+    pds = pds.cpu().numpy()
+    gts = gts.cpu().numpy()
+    ##print(gts.shape,pds.shape)
+    n = pds.shape[0]
+    tps = np.zeros(n)
+    scores = pds[:,4]*pds[:,5]
+    idx = np.argsort(-scores)
+    scores = scores[idx]
+    pds = pds[idx]
+    pd_idx = np.where(pds[:-1]<21)[0]
+    pdbboxes = pds[pd_idx,:4].reshape(-1,4)
+    gtbboxes = gts[:,1:].reshape(-1,4)
+    nc = pdbboxes.shape[0]
+    mc = gtbboxes.shape[0]
+    selected = np.zeros(mc)
+    for i in range(nc):
+        if mc == 0:
+            break
+        pdbbox = pdbboxes[i]
+        ious = iou_wt_center_np(pdbbox,gtbboxes)
+        best = ious.argmax()
+        iou = ious.max()
+        if (selected[best]!=1) and (iou > threshold):
+            selected[best] = 1
+            tps[pd_idx[i]] = 1.0
+            mc -= 1      
+    return [tps,scores,pds[:,-1]]
+def xyhw2xy(boxes_):
+    boxes = boxes_.clone()
+    boxes[:,0] = boxes_[:,0] - boxes_[:,2]/2
+    boxes[:,1] = boxes_[:,1] - boxes_[:,3]/2
+    boxes[:,2] = boxes_[:,0] + boxes_[:,2]/2
+    boxes[:,3] = boxes_[:,1] + boxes_[:,3]/2
+    return boxes
+def xy2xyhw(boxes):
+    boxes_ = boxes.clone()
+    boxes_[:,0] = (boxes[:,0] + boxes[:,2])/2
+    boxes_[:,1] = (boxes[:,1] + boxes[:,3])/2
+    boxes_[:,2] = boxes[:,2] - boxes[:,0]
+    boxes_[:,3] = boxes[:,3] - boxes[:,1]
+    return boxes_
+
+def rescale_boxes(boxes, current_dim, original_shape):
+    """ Rescales bounding boxes to the original shape """
+    orig_h, orig_w = original_shape
+    # The amount of padding that was added
+    pad_x = max(orig_h - orig_w, 0) * (current_dim / max(original_shape))
+    pad_y = max(orig_w - orig_h, 0) * (current_dim / max(original_shape))
+    # Image height and width after padding is removed
+    unpad_h = current_dim - pad_y
+    unpad_w = current_dim - pad_x
+    # Rescale bounding boxes to dimension of original image
+    boxes[:, 0] = ((boxes[:, 0] - pad_x // 2) / unpad_w) * orig_w
+    boxes[:, 1] = ((boxes[:, 1] - pad_y // 2) / unpad_h) * orig_h
+    boxes[:, 2] = ((boxes[:, 2] - pad_x // 2) / unpad_w) * orig_w
+    boxes[:, 3] = ((boxes[:, 3] - pad_y // 2) / unpad_h) * orig_h
+
+    return boxes    
+
+def cal_metrics_wo_cls(pd,gt,threshold=0.5):
+    pd = pd.cpu().numpy()#n
+    gt = gt.cpu().numpy()#m
+    pd_bboxes = pd[:,:4]
+    gt = gt[:,1:]
+    m = len(gt)
+    n = len(pd_bboxes)
+    if n>0 and m>0:
+        ious = iou_wt_center_np(pd_bboxes,gt) #nxm
+        scores = ious.max(axis=1) 
+        fp = scores <= threshold
+
+        #only keep trues
+        ious = ious[~fp,:]
+        fp = fp.sum() # transfer to scalar
+
+
+        select_ids = ious.argmax(axis=1)
+        #discard fps hit gt boxes has been hitted by bboxes with higher conf
+        tp = len(np.unique(select_ids))
+        fp += len(select_ids)- tp
+
+        
+        # groud truth with no associated predicted object
+        assert (fp+tp)==n
+        fn = m-tp
+        p = tp/n
+        r = tp/m
+        assert(p<=1)
+        assert(r<=1)
+        ap = tp/(fp+fn+tp)
+        return p,r,ap
+    elif m>0 or n >0 :
+        return 0,0,0
     else:
-        return np.array([])
+        return 1,1,1
+    
+def non_maximum_supression(preds,conf_threshold=0.5,nms_threshold = 0.4):
+    preds = preds[preds[:,4]>conf_threshold]
+    if len(preds) == 0:
+        return preds      
+    score = preds[:,4]*preds[:,5:].max(1)[0]
+    idx = torch.argsort(score,descending=True)
+    preds = preds[idx]
+    cls_confs,cls_labels = torch.max(preds[:,5:],dim=1,keepdim=True)
+    dets = torch.cat((preds[:,:5],cls_confs,cls_labels.float()),dim=1)
+    keep = []
+    while len(dets)>0:
+        mask = dets[0,-1]==dets[:,-1]
+        new = dets[0]
+        keep.append(new)
+        ious = iou_wt_center(dets[0,:4],dets[:,:4])
+        if not(ious[0]>=0.7):
+            ious[0] = 1
+        mask = mask & (ious>nms_threshold)
+        #hard-nms        
+        dets = dets[~mask]
+    if len(keep)>0:
+        return torch.stack(keep).reshape(-1,7)
+    else:
+        return torch.tensor(keep).reshape(-1,7)
+def non_maximum_supression_soft(preds,conf_threshold=0.5,nms_threshold=0.4):
+    keep = []
+    cls_confs,cls_labels = torch.max(preds[:,5:],dim=1,keepdim=True)
+    dets = torch.cat((preds[:,:5],cls_confs,cls_labels.float()),dim=1)
+    dets = dets[dets[:,4]>conf_threshold]
+    while len(dets)>0:
+        _,idx = torch.max(dets[:,4]*dets[:,5],dim=0)
+        val = dets[idx,4]
+        if val<=conf_threshold:
+            continue        
+        pd = dets[idx]
+        dets = torch.cat((dets[:idx],dets[idx+1:]))
+        ious = iou_wt_center(pd[:4],dets[:,:4])
+        mask = (ious>nms_threshold) & (pd[-1]==dets[:,-1])
+        keep.append(pd)
+        dets[mask,4] *= (1-ious[mask])*(1-val)
+        dets = dets[dets[:,4]>conf_threshold]
+    if len(keep)>0:
+        return torch.stack(keep).reshape(-1,7)
+    else:
+        return torch.tensor(keep).reshape(-1,7)
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -14,3 +14,6 @@
   + [ ] Add more augmentation tricks
   + [ ] Transfer to YCB-Dataset or other dataset (Orginally train/test on Linemod and Linemod-occlusion)
   + [ ] Improve accuracy
++ Data
+  + internal matrix
+    + fx=572.41140, px=325.26110, fy=573.57043; py=242.04899
