@@ -3,7 +3,7 @@ import numpy as np
 import yaml
 import os
 from plyfile import PlyData
-from progress.bar import Bar
+from progress.bar import Bar # for progress visualization
 import json
 cam_K= np.array([572.4114, 0.0, 325.2611, 0.0, 573.57043, 242.04899, 0.0, 0.0, 1.0]).reshape(3,3)
 path = '../../dataset/Linemod_preprocessed/'
@@ -73,8 +73,7 @@ def generate_annotation_single(path,obj_id,diameter):
         bar.next()
     bar.finish()
     json.dump(processed,open(f'{obj}.json','w'))
-def generate_annotation_multi(path,diameters):    
-    obj = objs[2]    
+def generate_annotation_multi(path,diameters):       
     file_name = '02'    
     processed = {'img_path':os.path.join(path,'data',file_name,'rgb')}
     processed['depth_path']=os.path.join(path,'data',file_name,'depth')
@@ -114,6 +113,7 @@ def generate_annotation_multi(path,diameters):
     processed['diamters'] = classes
     processed['cls_num'] = len(classes)
     json.dump(processed,open(f'multi.json','w'))
+
 info = yaml.load(open(os.path.join(path,'models','models_info.yml')),Loader=yaml.FullLoader)
 diameters = {}
 for idx in single:

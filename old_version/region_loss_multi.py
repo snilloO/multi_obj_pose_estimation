@@ -74,7 +74,6 @@ def build_targets(pred_corners, target, num_anchors, num_classes, nH, nW, noobje
             if target[b][t*21+1] == 0:
                 break
             nGT = nGT + 1
-            best_iou = 0.0
             best_n = -1
             gx0 = target[b][t*21+1] * nW
             gy0 = target[b][t*21+2] * nH

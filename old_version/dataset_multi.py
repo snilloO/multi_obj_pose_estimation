@@ -37,24 +37,6 @@ class listDataset(Dataset):
     def __getitem__(self, index):
         assert index <= len(self), 'index range error'
         imgpath = self.parent_dir+self.lines[index].rstrip()
-
-        '''if self.train and index % 64== 0:
-            if self.seen < 4000*64:
-               width = 13*32
-               self.shape = (width, width)
-            elif self.seen < 8000*64:
-               width = (random.randint(0,3) + 13)*32
-               self.shape = (width, width)
-            elif self.seen < 12000*64:
-               width = (random.randint(0,5) + 12)*32
-               self.shape = (width, width)
-            elif self.seen < 16000*64:
-               width = (random.randint(0,7) + 11)*32
-               self.shape = (width, width)
-            else: # self.seen < 20000*64:
-               width = (random.randint(0,9) + 10)*32
-               self.shape = (width, width)'''
-
         if self.train:
             # jitter = 0.2
             jitter = 0.1
